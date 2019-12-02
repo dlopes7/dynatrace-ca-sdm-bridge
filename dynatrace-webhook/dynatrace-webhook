@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+
+start() {
+    mkdir -p log
+    echo "Attempting to start bin/webhook"
+    nohup bin/webhook > log/console.log 2>&1&
+    sleep 0.05
+    echo "$(<log/console.log)"
+}
+
+stop(){
+    process=$(pidof webhook)
+    if [ -z "$process" ] 
+    then
+        echo "Could not find the webhook process"
+    else
+        echo "Attempting to kill PID $process"
+        kill $process
+        echo "Got response $? killing the process"
+fi
+}
+
+case "$1" in
+    start)
+        start;;
+    stop)
+        stop;;
+    restart)
+        stop
+        start;;
+    *)
+    echo "Usage: $0 {start|stop|restart}"
+esac
