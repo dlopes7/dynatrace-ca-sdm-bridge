@@ -119,7 +119,7 @@ func SDMHandler(w http.ResponseWriter, r *http.Request) {
 		err = try.Do(func(attempt int) (bool, error) {
 			var err error
 			logger.Infof("Attempting to open a ticket (%d of %d)", attempt, try.MaxRetries)
-			ticket, err = openTicket(problem.ProblemDetailsText, title)
+			ticket, err = openTicket(problem.ProblemDetailsText, title, problem.Pcat)
 			if err != nil {
 				return true, err
 			}
@@ -374,7 +374,7 @@ func closeTicket(objectHandle string) (*UpdateObjectResponse, error) {
 
 }
 
-func openTicket(description string, summary string) (*CreateRequestResponse, error) {
+func openTicket(description string, summary string, pcat string) (*CreateRequestResponse, error) {
 
 	l, err := login(config.SDMUsername, config.SDMPassword)
 	if err != nil {
@@ -401,7 +401,7 @@ func openTicket(description string, summary string) (*CreateRequestResponse, err
 		{"string": h.GetHandleForUserIDReturn},
 
 		{"string": "category"},
-		{"string": "pcat:400373"},
+		{"string": fmt.Sprintf("pcat:%s", pcat)},
 
 		{"string": "description"},
 		{"string": description},
