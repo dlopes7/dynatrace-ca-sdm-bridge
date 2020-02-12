@@ -21,6 +21,10 @@ var format = logging.MustStringFormatter(
 
 var client *gosoap.Client
 
+type Storage struct {
+	Problems map[string]CreateRequestResponse `json:"problems"`
+}
+
 type Config struct {
 	ListenerPort int    `json:"listenerPort"`
 	LogLevel     string `json:"logLevel"`
@@ -30,6 +34,7 @@ type Config struct {
 }
 
 type Problem struct {
+	Pcat               string `json:"Pcat"`
 	ProblemID          string `json:"ProblemID"`
 	State              string `json:"State"`
 	ProblemDetailsText string `json:"ProblemDetailsText"`
@@ -59,9 +64,13 @@ type GetHandleForUserIDResponse struct {
 }
 
 type CreateRequestResponse struct {
-	CreateRequestReturn string `xml:"createRequestReturn"`
-	NewRequestHandle    string `xml:"newRequestHandle"`
-	NewRequestNumber    string `xml:"newRequestNumber"`
+	// CreateRequestReturn string `xml:"createRequestReturn"`
+	NewRequestHandle string `xml:"newRequestHandle"`
+	NewRequestNumber string `xml:"newRequestNumber"`
+}
+
+type UpdateObjectResponse struct {
+	UpdateObjectReturn string `xml:"updateObjectReturn"`
 }
 
 func (p Problem) String() string {
@@ -103,33 +112,127 @@ func SDMHandler(w http.ResponseWriter, r *http.Request) {
 
 	logger.Debugf("Parsed problem: %+v", problem)
 
-	title := fmt.Sprintf("Dynatrace - %s (Problem ID: %s, State: %s)", problem.ProblemTitle, problem.ProblemID, problem.State)
-	var ticket *CreateRequestResponse
-	err = try.Do(func(attempt int) (bool, error) {
-		var err error
-		logger.Infof("Attempting to open a ticket (%d of %d)", attempt, try.MaxRetries)
-		ticket, err = openTicket(problem.ProblemDetailsText, title)
-		if err != nil {
-			return true, err
-		}
-		return false, nil
-	})
-	if err != nil {
-		resp = Response{
-			Error:   true,
-			Message: fmt.Sprintf("Could not open ticket after %d tries, error: %s", try.MaxRetries, err.Error()),
-		}
-		w.WriteHeader(http.StatusInternalServerError)
+	if problem.State == "OPEN" {
 
-	} else {
-		logger.Infof("Opened ticket: %+s", ticket.NewRequestNumber)
-		resp = Response{
-			Error:   false,
-			Message: fmt.Sprintf("Opened ticket: %s", ticket.NewRequestNumber),
+		title := fmt.Sprintf("Dynatrace - %s (Problem ID: %s, State: %s)", problem.ProblemTitle, problem.ProblemID, problem.State)
+		var ticket *CreateRequestResponse
+		err = try.Do(func(attempt int) (bool, error) {
+			var err error
+			logger.Infof("Attempting to open a ticket (%d of %d)", attempt, try.MaxRetries)
+			ticket, err = openTicket(problem.ProblemDetailsText, title)
+			if err != nil {
+				return true, err
+			}
+			return false, nil
+		})
+		if err != nil {
+			resp = Response{
+				Error:   true,
+				Message: fmt.Sprintf("Could not open ticket after %d tries, error: %s", try.MaxRetries, err.Error()),
+			}
+			w.WriteHeader(http.StatusInternalServerError)
+
+		} else {
+			logger.Infof("Opened ticket: %+s", ticket.NewRequestNumber)
+			resp = Response{
+				Error:   false,
+				Message: fmt.Sprintf("Opened ticket: %s", ticket.NewRequestNumber),
+			}
+			storeNewProblem(problem, ticket)
+			w.WriteHeader(http.StatusOK)
 		}
-		w.WriteHeader(http.StatusOK)
+	} else if problem.State == "RESOLVED" {
+
+		ticket := getTicketNumberFromStorage(problem)
+		if ticket != nil {
+			var closedTicket *UpdateObjectResponse
+			err = try.Do(func(attempt int) (bool, error) {
+				var err error
+				logger.Infof("Attempting to close ticket %s (%d of %d)", ticket.NewRequestNumber, attempt, try.MaxRetries)
+				closedTicket, err = closeTicket(ticket.NewRequestHandle)
+				if err != nil {
+					return true, err
+				}
+				return false, nil
+			})
+			if err != nil {
+				resp = Response{
+					Error:   true,
+					Message: fmt.Sprintf("Could not close ticket %s after %d tries, error: %s", ticket.NewRequestNumber, try.MaxRetries, err.Error()),
+				}
+				w.WriteHeader(http.StatusInternalServerError)
+			} else {
+				logger.Infof("Closed ticket: %+s", ticket.NewRequestNumber)
+				resp = Response{
+					Error:   false,
+					Message: fmt.Sprintf("Closed ticket: %s", ticket.NewRequestNumber),
+				}
+				w.WriteHeader(http.StatusOK)
+			}
+		}
 	}
 	json.NewEncoder(w).Encode(resp)
+
+}
+
+func getTicketNumberFromStorage(problem Problem) *CreateRequestResponse {
+
+	var storage Storage
+
+	storageFile, err := os.Open("storage.json")
+	if err != nil {
+		logger.Infof("Could not read storage.json: %s, creating a new one", err.Error())
+		storageFile, err = os.Create("storage.json")
+		if err != nil {
+			log.Fatalf("Could not create storage.json: %s", err.Error())
+		}
+	}
+
+	defer storageFile.Close()
+
+	byteValue, _ := ioutil.ReadAll(storageFile)
+	err = json.Unmarshal(byteValue, &storage)
+	if err != nil {
+		logger.Infof("Could not parse the storage file: %s, creating empty Storage", err.Error())
+		storage = Storage{Problems: map[string]CreateRequestResponse{}}
+	}
+
+	if ticket, ok := storage.Problems[problem.ProblemID]; ok {
+		return &ticket
+	} else {
+		logger.Warningf("Could not find ticket number for Problem %s", problem.ProblemID)
+	}
+
+	return nil
+}
+
+func storeNewProblem(problem Problem, ticket *CreateRequestResponse) {
+
+	var storage Storage
+
+	storageFile, err := os.Open("storage.json")
+	if err != nil {
+		logger.Infof("Could not read storage.json: %s, creating a new one", err.Error())
+		storageFile, err = os.Create("storage.json")
+		if err != nil {
+			log.Fatalf("Could not create storage.json: %s", err.Error())
+		}
+	}
+
+	defer storageFile.Close()
+
+	byteValue, _ := ioutil.ReadAll(storageFile)
+	err = json.Unmarshal(byteValue, &storage)
+	if err != nil {
+		logger.Infof("Could not parse the storage file: %s, creating empty Storage", err.Error())
+		storage = Storage{Problems: map[string]CreateRequestResponse{}}
+	}
+
+	logger.Infof("Storing problem %s with ticket %s", problem.ProblemID, ticket.NewRequestNumber)
+	storage.Problems[problem.ProblemID] = *ticket
+
+	file, _ := json.MarshalIndent(storage, "", " ")
+	_ = ioutil.WriteFile("storage.json", file, 0644)
 
 }
 
@@ -174,6 +277,30 @@ func login(username string, password string) (*LoginResponse, error) {
 	return &loginResponse, nil
 }
 
+func updateObject(sid string, objectHandle string, attrVals []gosoap.Params, attributes []gosoap.Params) (*UpdateObjectResponse, error) {
+
+	params := gosoap.Params{
+		"sid":          sid,
+		"objectHandle": objectHandle,
+		"attrVals":     attrVals,
+		"attributes":   attributes,
+	}
+
+	err := client.Call("updateObject", params)
+	if err != nil {
+		return nil, err
+	}
+
+	r := UpdateObjectResponse{}
+	err = client.Unmarshal(&r)
+	if err != nil {
+		return nil, err
+	}
+
+	return &r, nil
+
+}
+
 func createRequest(sid string,
 	creatorHandle string,
 	attrVals []gosoap.Params,
@@ -209,6 +336,44 @@ func createRequest(sid string,
 
 }
 
+func closeTicket(objectHandle string) (*UpdateObjectResponse, error) {
+	l, err := login(config.SDMUsername, config.SDMPassword)
+	if err != nil {
+		logger.Errorf("Could not login: %s", err.Error())
+		if client.Body != nil {
+			logger.Debugf("The body was %s", client.Body)
+		}
+		return nil, err
+	}
+	logger.Infof("Got back token: %+v", l)
+
+	attrValues := []gosoap.Params{
+		{"string": "status"},
+		{"string": "RE"},
+
+		{"string": "rootcause"},
+		{"string": "rc:400174"},
+	}
+
+	attributes := []gosoap.Params{
+		{"string": "status"},
+		{"string": "rootcause"},
+	}
+
+	r, err := updateObject(l.LoginReturn, objectHandle, attrValues, attributes)
+
+	if err != nil {
+		logger.Errorf("Could not update request: %s", err.Error())
+		if client.Body != nil {
+			logger.Debugf("The body was %s", client.Body)
+		}
+		return nil, err
+	}
+
+	return r, nil
+
+}
+
 func openTicket(description string, summary string) (*CreateRequestResponse, error) {
 
 	l, err := login(config.SDMUsername, config.SDMPassword)
@@ -221,7 +386,7 @@ func openTicket(description string, summary string) (*CreateRequestResponse, err
 	}
 	logger.Infof("Got back token: %+v", l)
 
-	h, err := getHandle(l.LoginReturn, "testedeconformidade")
+	h, err := getHandle(l.LoginReturn, config.SDMUsername)
 	if err != nil {
 		logger.Errorf("Could not get handle: %s", err.Error())
 		if client.Body != nil {
